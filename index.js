@@ -1,12 +1,15 @@
+require('dotenv').config();
 const axios = require('axios');
 const ti = require('technicalindicators');
 const Table = require('cli-table3');
 const colors = require('colors');
 
-require('dotenv').config();
 const API_KEY = process.env.ALPHA_VANTAGE_API_KEY;
 const PAIRS = ['EUR/USD', 'GBP/USD', 'USD/JPY', 'AUD/USD'];
 const REFRESH_INTERVAL = 15; // minutes
+const ACCOUNT_SIZE = 35; // USD
+const RISK_PERCENT = 2; // 2% per trade
+const RISK_AMOUNT = ACCOUNT_SIZE * (RISK_PERCENT / 100); // $0.70
 
 async function fetchForexData(fromCurrency, toCurrency) {
   const url = `https://www.alphavantage.co/query?function=FX_DAILY&from_symbol=${fromCurrency}&to_symbol=${toCurrency}&apikey=${API_KEY}&outputsize=compact`;
@@ -26,43 +29,114 @@ async function fetchForexData(fromCurrency, toCurrency) {
 function detectCandlePatterns(candles) {
   const patterns = [];
   const last = candles[candles.length - 1];
-  const prev = candles[candles.length - 2];
-  const prev2 = candles[candles.length - 3];
 
-  // Doji
   const dojiValues = ti.doji({ open: candles.map(c => c.open), high: candles.map(c => c.high), low: candles.map(c => c.low), close: candles.map(c => c.close) });
-  if (dojiValues[dojiValues.length - 1]) patterns.push('Doji ⚠️');
+  if (dojiValues[dojiValues.length - 1]) patterns.push('Doji');
 
-  // Hammer
   const hammerValues = ti.hammerpattern({ open: candles.map(c => c.open), high: candles.map(c => c.high), low: candles.map(c => c.low), close: candles.map(c => c.close) });
-  if (hammerValues[hammerValues.length - 1]) patterns.push('Hammer 🔨');
+  if (hammerValues[hammerValues.length - 1]) patterns.push('Hammer');
 
-  // Bullish Engulfing
   const bullEngulf = ti.bullishengulfingpattern({ open: candles.map(c => c.open), high: candles.map(c => c.high), low: candles.map(c => c.low), close: candles.map(c => c.close) });
-  if (bullEngulf[bullEngulf.length - 1]) patterns.push('Bull Engulf 📈');
+  if (bullEngulf[bullEngulf.length - 1]) patterns.push('Bull Engulf');
 
-  // Bearish Engulfing
   const bearEngulf = ti.bearishengulfingpattern({ open: candles.map(c => c.open), high: candles.map(c => c.high), low: candles.map(c => c.low), close: candles.map(c => c.close) });
-  if (bearEngulf[bearEngulf.length - 1]) patterns.push('Bear Engulf 📉');
+  if (bearEngulf[bearEngulf.length - 1]) patterns.push('Bear Engulf');
 
-  // Morning Star
   const morningStar = ti.morningstar({ open: candles.map(c => c.open), high: candles.map(c => c.high), low: candles.map(c => c.low), close: candles.map(c => c.close) });
-  if (morningStar[morningStar.length - 1]) patterns.push('Morning Star 🌅');
+  if (morningStar[morningStar.length - 1]) patterns.push('Morning Star');
 
-  // Evening Star
   const eveningStar = ti.eveningstar({ open: candles.map(c => c.open), high: candles.map(c => c.high), low: candles.map(c => c.low), close: candles.map(c => c.close) });
-  if (eveningStar[eveningStar.length - 1]) patterns.push('Evening Star 🌇');
+  if (eveningStar[eveningStar.length - 1]) patterns.push('Evening Star');
 
-  // Manual Shooting Star
   const body = Math.abs(last.close - last.open);
   const upperWick = last.high - Math.max(last.open, last.close);
   const lowerWick = Math.min(last.open, last.close) - last.low;
-  if (upperWick > 2 * body && lowerWick < body) patterns.push('Shooting Star 🌠');
+  if (upperWick > 2 * body && lowerWick < body) patterns.push('Shooting Star');
 
-  return patterns.length > 0 ? patterns.join(', ') : 'None';
+  return patterns;
 }
 
-function analyzeSignal(candles) {
+function detectTrend(closes) {
+  const sma20 = ti.SMA.calculate({ values: closes, period: 20 });
+  const sma50 = ti.SMA.calculate({ values: closes, period: 50 });
+  const lastSma20 = sma20[sma20.length - 1];
+  const lastSma50 = sma50[sma50.length - 1];
+  const prevSma20 = sma20[sma20.length - 5];
+
+  if (lastSma20 > lastSma50 && lastSma20 > prevSma20) return 'UPTREND';
+  if (lastSma20 < lastSma50 && lastSma20 < prevSma20) return 'DOWNTREND';
+  return 'SIDEWAYS';
+}
+
+function findSupportResistance(candles) {
+  const highs = candles.map(c => c.high);
+  const lows = candles.map(c => c.low);
+  const recentHighs = highs.slice(-20);
+  const recentLows = lows.slice(-20);
+  const resistance = Math.max(...recentHighs);
+  const support = Math.min(...recentLows);
+  return { support, resistance };
+}
+
+function calculateSignalStrength(rsi, macd, trend, patterns, signal) {
+  let score = 0;
+
+  if (signal === 'BUY' || signal === 'WEAK BUY') {
+    if (rsi < 30) score += 30;
+    else if (rsi < 40) score += 15;
+    if (macd.MACD > macd.signal) score += 25;
+    if (trend === 'UPTREND') score += 20;
+    if (patterns.includes('Hammer') || patterns.includes('Morning Star') || patterns.includes('Bull Engulf')) score += 25;
+  } else if (signal === 'SELL' || signal === 'WEAK SELL') {
+    if (rsi > 70) score += 30;
+    else if (rsi > 60) score += 15;
+    if (macd.MACD < macd.signal) score += 25;
+    if (trend === 'DOWNTREND') score += 20;
+    if (patterns.includes('Shooting Star') || patterns.includes('Evening Star') || patterns.includes('Bear Engulf')) score += 25;
+  } else {
+    score = 20;
+  }
+
+  return Math.min(score, 100);
+}
+
+function calculateRiskManagement(signal, currentPrice, support, resistance, pair) {
+  const isJPY = pair.includes('JPY');
+  const pipSize = isJPY ? 0.01 : 0.0001;
+  const pipValue = isJPY ? 0.0007 : 0.07; // approx pip value for micro lot
+
+  let entry, stopLoss, takeProfit, stopPips, takePips, ratio, positionSize, recommendation;
+
+  if (signal === 'BUY' || signal === 'WEAK BUY') {
+    entry = currentPrice;
+    stopLoss = parseFloat((support - pipSize * 5).toFixed(5));
+    stopPips = Math.round((entry - stopLoss) / pipSize);
+    takePips = stopPips * 2;
+    takeProfit = parseFloat((entry + pipSize * takePips).toFixed(5));
+    ratio = `1:2`;
+    positionSize = (RISK_AMOUNT / (stopPips * pipValue)).toFixed(2);
+    recommendation = stopPips > 5 && stopPips < 100 ? '✅ TAKE TRADE' : '⚠️ SKIP - SL too wide';
+  } else if (signal === 'SELL' || signal === 'WEAK SELL') {
+    entry = currentPrice;
+    stopLoss = parseFloat((resistance + pipSize * 5).toFixed(5));
+    stopPips = Math.round((stopLoss - entry) / pipSize);
+    takePips = stopPips * 2;
+    takeProfit = parseFloat((entry - pipSize * takePips).toFixed(5));
+    ratio = `1:2`;
+    positionSize = (RISK_AMOUNT / (stopPips * pipValue)).toFixed(2);
+    recommendation = stopPips > 5 && stopPips < 100 ? '✅ TAKE TRADE' : '⚠️ SKIP - SL too wide';
+  } else {
+    return {
+      entry: '-', stopLoss: '-', takeProfit: '-',
+      stopPips: '-', takePips: '-', ratio: '-',
+      positionSize: '-', recommendation: '⏳ WAIT'
+    };
+  }
+
+  return { entry, stopLoss, takeProfit, stopPips, takePips, ratio, positionSize, recommendation };
+}
+
+function analyzeSignal(candles, pair) {
   const closes = candles.map(c => c.close);
 
   const rsiValues = ti.RSI.calculate({ values: closes, period: 14 });
@@ -81,18 +155,19 @@ function analyzeSignal(candles) {
   const sma20 = ti.SMA.calculate({ values: closes, period: 20 });
   const sma50 = ti.SMA.calculate({ values: closes, period: 50 });
   const currentPrice = closes[closes.length - 1];
-
-  const candlePatterns = detectCandlePatterns(candles);
+  const trend = detectTrend(closes);
+  const { support, resistance } = findSupportResistance(candles);
+  const patterns = detectCandlePatterns(candles);
 
   let signal = 'NEUTRAL';
   let reason = '';
 
   if (rsi < 30 && macd.MACD > macd.signal && sma20[sma20.length - 1] > sma50[sma50.length - 1]) {
     signal = 'BUY';
-    reason = 'RSI oversold + MACD bullish + SMA20 > SMA50';
+    reason = 'RSI oversold + MACD bullish + SMA crossover';
   } else if (rsi > 70 && macd.MACD < macd.signal && sma20[sma20.length - 1] < sma50[sma50.length - 1]) {
     signal = 'SELL';
-    reason = 'RSI overbought + MACD bearish + SMA20 < SMA50';
+    reason = 'RSI overbought + MACD bearish + SMA crossover';
   } else if (rsi < 40 && macd.MACD > macd.signal) {
     signal = 'WEAK BUY';
     reason = 'RSI low + MACD bullish crossover';
@@ -103,23 +178,28 @@ function analyzeSignal(candles) {
     reason = 'No strong signal detected';
   }
 
-  // Boost signal confidence with candle patterns
-  if (candlePatterns.includes('Hammer') || candlePatterns.includes('Morning Star') || candlePatterns.includes('Bull Engulf')) {
+  if (patterns.includes('Hammer') || patterns.includes('Morning Star') || patterns.includes('Bull Engulf')) {
     if (signal === 'NEUTRAL') { signal = 'WEAK BUY'; reason = 'Bullish candle pattern detected'; }
-    if (signal === 'WEAK BUY') { signal = 'BUY'; reason += ' + Bullish pattern confirmed'; }
+    else if (signal === 'WEAK BUY') { signal = 'BUY'; reason += ' + Bullish pattern confirmed'; }
   }
-  if (candlePatterns.includes('Evening Star') || candlePatterns.includes('Bear Engulf') || candlePatterns.includes('Shooting Star')) {
+  if (patterns.includes('Evening Star') || patterns.includes('Bear Engulf') || patterns.includes('Shooting Star')) {
     if (signal === 'NEUTRAL') { signal = 'WEAK SELL'; reason = 'Bearish candle pattern detected'; }
-    if (signal === 'WEAK SELL') { signal = 'SELL'; reason += ' + Bearish pattern confirmed'; }
+    else if (signal === 'WEAK SELL') { signal = 'SELL'; reason += ' + Bearish pattern confirmed'; }
   }
+
+  const strength = calculateSignalStrength(rsi, macd, trend, patterns, signal);
+  const risk = calculateRiskManagement(signal, currentPrice, support, resistance, pair);
 
   return {
     price: currentPrice.toFixed(5),
     rsi: rsi.toFixed(2),
     macd: macd.MACD.toFixed(5),
     signal,
+    strength,
+    trend,
+    patterns: patterns.length > 0 ? patterns.join(', ') : 'None',
     reason,
-    candlePatterns
+    risk
   };
 }
 
@@ -131,43 +211,55 @@ function colorSignal(signal) {
   return colors.grey(signal);
 }
 
+function colorStrength(strength) {
+  if (strength >= 75) return colors.green.bold(`${strength}%`);
+  if (strength >= 50) return colors.yellow(`${strength}%`);
+  return colors.red(`${strength}%`);
+}
+
+function colorTrend(trend) {
+  if (trend === 'UPTREND') return colors.green(trend);
+  if (trend === 'DOWNTREND') return colors.red(trend);
+  return colors.grey(trend);
+}
+
 async function runAnalyzer() {
   console.clear();
   const now = new Date().toLocaleTimeString();
-  console.log(colors.bold.white(`\n====== FOREX SIGNAL ANALYZER ====== [${now}]`));
-  console.log(colors.grey(`Next refresh in ${REFRESH_INTERVAL} minutes...\n`));
-
-  const table = new Table({
-    head: ['Pair', 'Price', 'RSI', 'MACD', 'Signal', 'Candle Patterns', 'Reason'].map(h => colors.bold.white(h)),
-    colWidths: [12, 12, 10, 12, 12, 30, 40]
-  });
+  console.log(colors.bold.white(`\n====== FOREX SIGNAL ANALYZER + RISK MANAGER ====== [${now}]`));
+  console.log(colors.grey(`Account: $${ACCOUNT_SIZE} | Risk per trade: ${RISK_PERCENT}% ($${RISK_AMOUNT.toFixed(2)}) | Next refresh: ${REFRESH_INTERVAL} mins\n`));
 
   for (const pair of PAIRS) {
     const [from, to] = pair.split('/');
     try {
       console.log(`Fetching data for ${pair}...`);
       const candles = await fetchForexData(from, to);
-      const result = analyzeSignal(candles);
-      table.push([
-        colors.bold.yellow(pair),
-        result.price,
-        result.rsi,
-        result.macd,
-        colorSignal(result.signal),
-        result.candlePatterns,
-        result.reason
-      ]);
+      const result = analyzeSignal(candles, pair);
+
+      console.log(colors.bold.yellow(`\n┌─── ${pair} ───────────────────────────────────────`));
+      console.log(`│ Price:     ${result.price}    RSI: ${result.rsi}    MACD: ${result.macd}`);
+      console.log(`│ Trend:     ${colorTrend(result.trend)}`);
+      console.log(`│ Patterns:  ${result.patterns}`);
+      console.log(`│ Signal:    ${colorSignal(result.signal)}  (${colorStrength(result.strength)} confidence)`);
+      console.log(`│ Reason:    ${result.reason}`);
+      console.log(colors.bold.white(`│ ── Risk Management ──────────────────────────────`));
+      console.log(`│ Entry:        ${result.risk.entry}`);
+      console.log(`│ Stop Loss:    ${result.risk.stopLoss}  (${result.risk.stopPips} pips)`);
+      console.log(`│ Take Profit:  ${result.risk.takeProfit}  (${result.risk.takePips} pips)`);
+      console.log(`│ R/R Ratio:    ${result.risk.ratio}`);
+      console.log(`│ Position:     ${result.risk.positionSize} micro lots`);
+      console.log(`│ Decision:     ${result.risk.recommendation}`);
+      console.log(colors.bold.yellow(`└─────────────────────────────────────────────────\n`));
+
       await new Promise(r => setTimeout(r, 15000));
     } catch (err) {
-      table.push([pair, 'ERROR', '-', '-', '-', '-', err.message]);
+      console.log(colors.red(`\n${pair} ERROR: ${err.message}\n`));
     }
   }
 
-  console.log(table.toString());
-  console.log(colors.grey('\n⚠️  For educational purposes only. Not financial advice.\n'));
+  console.log(colors.grey('⚠️  For educational purposes only. Not financial advice.\n'));
 }
 
-// Auto-refresh loop
 async function startAutoRefresh() {
   await runAnalyzer();
   setInterval(async () => {
