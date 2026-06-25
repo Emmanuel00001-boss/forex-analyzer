@@ -1,27 +1,25 @@
 require('dotenv').config();
 const axios = require('axios');
 const ti = require('technicalindicators');
-const Table = require('cli-table3');
 const colors = require('colors');
 
-const API_KEY = process.env.ALPHA_VANTAGE_API_KEY;
+const API_KEY = 'd3d77c3767e440ec96ce83df0e5adc39';
 const PAIRS = ['EUR/USD', 'GBP/USD', 'USD/JPY', 'AUD/USD'];
 const REFRESH_INTERVAL = 15; // minutes
 const ACCOUNT_SIZE = 35; // USD
 const RISK_PERCENT = 2; // 2% per trade
 const RISK_AMOUNT = ACCOUNT_SIZE * (RISK_PERCENT / 100); // $0.70
 
-async function fetchForexData(fromCurrency, toCurrency) {
-  const url = `https://www.alphavantage.co/query?function=FX_DAILY&from_symbol=${fromCurrency}&to_symbol=${toCurrency}&apikey=${API_KEY}&outputsize=compact`;
+async function fetchForexData(pair) {
+  const url = `https://api.twelvedata.com/time_series?symbol=${pair}&interval=1day&outputsize=100&apikey=${API_KEY}`;
   const response = await axios.get(url);
-  const timeSeries = response.data['Time Series FX (Daily)'];
-  if (!timeSeries) throw new Error(`No data for ${fromCurrency}/${toCurrency}`);
-  const candles = Object.entries(timeSeries).map(([date, d]) => ({
-    date,
-    open: parseFloat(d['1. open']),
-    high: parseFloat(d['2. high']),
-    low: parseFloat(d['3. low']),
-    close: parseFloat(d['4. close'])
+  if (response.data.status === 'error') throw new Error(response.data.message);
+  const candles = response.data.values.map(d => ({
+    date: d.datetime,
+    open: parseFloat(d.open),
+    high: parseFloat(d.high),
+    low: parseFloat(d.low),
+    close: parseFloat(d.close)
   })).reverse();
   return candles;
 }
@@ -69,10 +67,8 @@ function detectTrend(closes) {
 }
 
 function findSupportResistance(candles) {
-  const highs = candles.map(c => c.high);
-  const lows = candles.map(c => c.low);
-  const recentHighs = highs.slice(-20);
-  const recentLows = lows.slice(-20);
+  const recentHighs = candles.slice(-20).map(c => c.high);
+  const recentLows = candles.slice(-20).map(c => c.low);
   const resistance = Math.max(...recentHighs);
   const support = Math.min(...recentLows);
   return { support, resistance };
@@ -103,7 +99,7 @@ function calculateSignalStrength(rsi, macd, trend, patterns, signal) {
 function calculateRiskManagement(signal, currentPrice, support, resistance, pair) {
   const isJPY = pair.includes('JPY');
   const pipSize = isJPY ? 0.01 : 0.0001;
-  const pipValue = isJPY ? 0.0007 : 0.07; // approx pip value for micro lot
+  const pipValue = isJPY ? 0.0007 : 0.07;
 
   let entry, stopLoss, takeProfit, stopPips, takePips, ratio, positionSize, recommendation;
 
@@ -113,7 +109,7 @@ function calculateRiskManagement(signal, currentPrice, support, resistance, pair
     stopPips = Math.round((entry - stopLoss) / pipSize);
     takePips = stopPips * 2;
     takeProfit = parseFloat((entry + pipSize * takePips).toFixed(5));
-    ratio = `1:2`;
+    ratio = '1:2';
     positionSize = (RISK_AMOUNT / (stopPips * pipValue)).toFixed(2);
     recommendation = stopPips > 5 && stopPips < 100 ? '✅ TAKE TRADE' : '⚠️ SKIP - SL too wide';
   } else if (signal === 'SELL' || signal === 'WEAK SELL') {
@@ -122,7 +118,7 @@ function calculateRiskManagement(signal, currentPrice, support, resistance, pair
     stopPips = Math.round((stopLoss - entry) / pipSize);
     takePips = stopPips * 2;
     takeProfit = parseFloat((entry - pipSize * takePips).toFixed(5));
-    ratio = `1:2`;
+    ratio = '1:2';
     positionSize = (RISK_AMOUNT / (stopPips * pipValue)).toFixed(2);
     recommendation = stopPips > 5 && stopPips < 100 ? '✅ TAKE TRADE' : '⚠️ SKIP - SL too wide';
   } else {
@@ -230,10 +226,9 @@ async function runAnalyzer() {
   console.log(colors.grey(`Account: $${ACCOUNT_SIZE} | Risk per trade: ${RISK_PERCENT}% ($${RISK_AMOUNT.toFixed(2)}) | Next refresh: ${REFRESH_INTERVAL} mins\n`));
 
   for (const pair of PAIRS) {
-    const [from, to] = pair.split('/');
     try {
       console.log(`Fetching data for ${pair}...`);
-      const candles = await fetchForexData(from, to);
+      const candles = await fetchForexData(pair);
       const result = analyzeSignal(candles, pair);
 
       console.log(colors.bold.yellow(`\n┌─── ${pair} ───────────────────────────────────────`));
@@ -251,7 +246,7 @@ async function runAnalyzer() {
       console.log(`│ Decision:     ${result.risk.recommendation}`);
       console.log(colors.bold.yellow(`└─────────────────────────────────────────────────\n`));
 
-      await new Promise(r => setTimeout(r, 15000));
+      await new Promise(r => setTimeout(r, 2000));
     } catch (err) {
       console.log(colors.red(`\n${pair} ERROR: ${err.message}\n`));
     }
